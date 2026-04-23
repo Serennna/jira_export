@@ -1,0 +1,26 @@
+{
+  "name": "jira-xray-exporter",
+  "version": "1.0.0",
+  "description": "Export Jira tickets with Xray test steps to CSV",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "login": "node login.js",
+    "start": "node index.js",
+    "export": "node index.js",
+    "export:steps": "node export-steps-ui.js",
+    "export:full": "node export-full.js",
+    "export:range": "node export-range.js",
+    "merge:folder": "node merge-folder.js",
+    "merge": "node merge-to-excel.js",
+    "export:test-sets": "node export-test-sets.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "csv-parse": "^6.2.1",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "playwright": "^1.44.0"
+  }
+}

@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Environment variables (contains real credentials)
+.env
+
+# Playwright session (contains live browser session cookies)
+.auth/
+
+# Generated output files
+output/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# npm debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+output/
