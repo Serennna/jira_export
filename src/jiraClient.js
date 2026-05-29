@@ -36,6 +36,110 @@ export class JiraClient {
   }
 
   /**
+   * List available workflow transitions for an issue.
+   * @param {string} issueKey
+   * @returns {Promise<Array<{id: string, name: string, to?: {name?: string}}>>}
+   */
+  async getTransitions(issueKey) {
+    const response = await this.http.get(`/issue/${issueKey}/transitions`);
+    return response.data?.transitions ?? [];
+  }
+
+  /**
+   * Transition issue by target status name (case-insensitive).
+   * @param {string} issueKey
+   * @param {string} targetStatusName
+   * @returns {Promise<{id: string, name: string, to?: {name?: string}}>}
+   */
+  async transitionIssueToStatus(issueKey, targetStatusName) {
+    if (!issueKey || !targetStatusName) {
+      throw new Error('transitionIssueToStatus requires issueKey and targetStatusName');
+    }
+
+    const transitions = await this.getTransitions(issueKey);
+    const normalizedTarget = String(targetStatusName).trim().toLowerCase();
+    const matched = transitions.find((transition) => {
+      const toName = transition?.to?.name ?? '';
+      return toName.trim().toLowerCase() === normalizedTarget;
+    });
+
+    if (!matched) {
+      const available = transitions
+        .map((transition) => transition?.to?.name || transition?.name || '(unknown)')
+        .filter(Boolean)
+        .join(', ');
+      throw new Error(
+        `No transition found for status "${targetStatusName}" on ${issueKey}. `
+        + `Available transitions: ${available || '(none)'}`,
+      );
+    }
+
+    await this.http.post(`/issue/${issueKey}/transitions`, {
+      transition: { id: matched.id },
+    });
+
+    return matched;
+  }
+
+  /**
+   * Update issue fields.
+   * @param {string} issueKey
+   * @param {object} fields
+   * @returns {Promise<void>}
+   */
+  async updateIssueFields(issueKey, fields) {
+    if (!issueKey || !fields || typeof fields !== 'object') {
+      throw new Error('updateIssueFields requires issueKey and fields');
+    }
+    await this.http.put(`/issue/${issueKey}`, { fields });
+  }
+
+  /**
+   * Delete an issue link by link id.
+   * @param {string|number} linkId
+   * @returns {Promise<void>}
+   */
+  async deleteIssueLink(linkId) {
+    if (!linkId) throw new Error('deleteIssueLink requires linkId');
+    await this.http.delete(`/issueLink/${linkId}`);
+  }
+
+  /**
+   * Create a Jira issue.
+   *
+   * @param {object} input
+   * @param {string} input.projectKey
+   * @param {string} input.issueTypeName
+   * @param {string} input.summary
+   * @param {string} [input.description]
+   * @param {string[]} [input.labels]
+   * @returns {Promise<{id: string, key: string, self: string}>}
+   */
+  async createIssue({
+    projectKey,
+    issueTypeName,
+    summary,
+    description = '',
+    labels = [],
+  }) {
+    if (!projectKey || !issueTypeName || !summary) {
+      throw new Error('createIssue requires projectKey, issueTypeName, and summary');
+    }
+
+    const fields = {
+      project: { key: projectKey },
+      issuetype: { name: issueTypeName },
+      summary,
+    };
+
+    if (description) fields.description = JiraClient.textToAdf(description);
+    if (labels.length > 0) fields.labels = labels;
+
+    const response = await this.http.post('/issue', { fields });
+    return response.data;
+  }
+
+  /**
    * Search issues by JQL with automatic pagination.
    * Returns all matching issues (summarized) across all pages.
    *
@@ -119,6 +223,26 @@ export class JiraClient {
     };
 
     return walk(adf).trim();
+  }
+
+  /**
+   * Convert plain text to Atlassian Document Format.
+   * @param {string} text
+   * @returns {object}
+   */
+  static textToAdf(text) {
+    const lines = String(text ?? '')
+      .replace(/\r\n/g, '\n')
+      .split('\n');
+
+    return {
+      version: 1,
+      type: 'doc',
+      content: lines.map((line) => ({
+        type: 'paragraph',
+        content: line ? [{ type: 'text', text: line }] : [],
+      })),
+    };
   }
 
   /**

@@ -10,6 +10,7 @@
     "export": "node index.js",
     "export:steps": "node export-steps-ui.js",
     "export:full": "node export-full.js",
+    "import:tests": "node import-tests.js",
     "export:range": "node export-range.js",
     "merge:folder": "node merge-folder.js",
     "merge": "node merge-to-excel.js",

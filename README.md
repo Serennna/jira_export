@@ -7,6 +7,7 @@ A Node.js CLI tool to export Jira test cases with Xray test steps to structured 
 - Export Jira ticket metadata via the REST API
 - Capture Xray test steps via Playwright browser network interception
 - Export Test Sets with their contained Tests and step details
+- Import manual test cases/steps into Jira Xray from JSON
 - Merge CSV outputs into styled, hierarchical Excel (`.xlsx`) files
 - Supports headless operation after a one-time browser login
 
@@ -62,6 +63,8 @@ npm run login
 
 This opens a browser window for you to complete SSO. The session is saved to `.auth/session.json` for subsequent headless runs.
 
+For `npm run import:tests`, if `.auth/session.json` is missing/expired, the script now automatically opens an interactive browser login once, refreshes the session, and then continues the import.
+
 Alternatively, use your existing Chrome profile to skip manual SSO:
 
 ```bash
@@ -114,6 +117,32 @@ npm run export:full
 node export-full.js ACIOSMAU-123
 ```
 
+### Import Test Cases (JSON → Jira/Xray)
+
+Create/update tests and import manual steps from a JSON file:
+
+```bash
+# Default file: testcase_to_import.json
+npm run import:tests
+
+# Specify file
+npm run import:tests -- testcase_to_import.json
+
+# Stop on first failure
+npm run import:tests -- testcase_to_import.json --fail-fast
+
+# Dry run (no write)
+npm run import:tests -- testcase_to_import.json --dry-run
+```
+
+`testcase_to_import.json` in this repository is a sample template.  
+Update `projectKey`, `testKey`, and step content before real imports.
+
+Execution order per record:
+1. Create or use existing Test issue
+2. Transition to `Ready for Review`
+3. Import steps via Jira/Xray UI automation
+
 ### Metadata-only Export
 
 Exports ticket metadata without Xray steps (no browser required):
@@ -164,6 +193,7 @@ npm run export:steps
 ├── index.js                 # Metadata-only export (REST API)
 ├── export-full.js           # Full export with Xray steps (Playwright)
 ├── export-test-sets.js      # Test Set export (recommended)
+├── import-tests.js          # JSON-driven Jira/Xray test import
 ├── export-range.js          # Range-based step export
 ├── export-steps-ui.js       # CDP-based UI click export
 ├── merge-to-excel.js        # Merge a CSV pair to Excel

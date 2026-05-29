@@ -1,0 +1,222 @@
+[
+  {
+    "projectKey": "ACIOSMAU",
+    "summary": "[Sample] Verify banner visibility on dashboard",
+    "description": "Sample test created by import script. Replace fields before production use.",
+    "labels": ["sample", "regression"],
+    "steps": [
+      {
+        "action": "Open the app and navigate to Dashboard.",
+        "data": "User account: test.user@example.com",
+        "result": "Dashboard is displayed."
+      },
+      {
+        "action": "Trigger Remote Config where ads_show_banner_main_screen=true.",
+        "data": "Remote Config key: ads_show_banner_main_screen",
+        "result": "- Banner is visible.\n- Banner does not overlap primary CTA.\n- Banner can be dismissed if design requires."
+      }
+    ]
+  },
+  {
+    "testKey": "ACIOSMAU-1234",
+    "summary": "[Sample] Existing test update target",
+    "description": "When testKey is provided, import writes steps into the existing Jira Test.",
+    "labels": ["sample"],
+    "steps": [
+      {
+        "action": "Open Settings screen.",
+        "data": "",
+        "result": "Settings loads successfully."
+      },
+      {
+        "action": "Toggle Auto Backup ON and return to previous screen.",
+        "data": "",
+        "result": "- Auto Backup switch state is saved.\n- No crash or freeze occurs."
+      }
+    ]
+  }
+]
+[
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify local backup is created when user is not logged in with Google",
+    "description": "Verify that a local contacts backup can be created when the user is not logged in with a Google account.",
+    "labels": ["Regression"],
+    "steps": [
+      {
+        "action": "Open Contacts Backups while not logged in with a Google account.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Dismiss the Google Account Access popup by tapping Don't Connect, then create a backup.",
+        "data": "",
+        "result": "- A local backup is created successfully.\n- The backup appears in the Backups list.\n- The user can use Backups without logging in with Google."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify cloud backup is created when user is logged in with Google",
+    "description": "Verify that a cloud contacts backup can be created when the user is logged in with a Google account.",
+    "labels": ["Regression"],
+    "steps": [
+      {
+        "action": "Open Contacts Backups and log in with a Google account.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Create a contacts backup.",
+        "data": "",
+        "result": "- A backup is created successfully.\n- The backup appears in the Backups list.\n- The backup is associated with the logged-in Google account."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify cloud backups are synced after logging in with Google",
+    "description": "Verify that existing cloud backups are synced to the app after the user logs in with Google.",
+    "steps": [
+      {
+        "action": "Use a Google account that already has contacts backups stored in the cloud.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Log in with that Google account from the app and open Contacts Backups.",
+        "data": "",
+        "result": "- Existing cloud backups are synced to the app.\n- Synced backups appear in the Backups list.\n- The user can open the synced backups."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify local backups are synced to cloud after logging in with Google",
+    "description": "Verify that local backups created before Google login are synced to the cloud after the user logs in.",
+    "steps": [
+      {
+        "action": "Create a local contacts backup while not logged in with a Google account.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Log in with a Google account and open Contacts Backups.",
+        "data": "",
+        "result": "- The existing local backup remains visible in the Backups list.\n- The local backup is synced to the logged-in Google account.\n- The backup remains available after reopening the Backups screen."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify user can log out from Google account in Settings",
+    "description": "Verify that the user can disconnect the Google account from Settings and return to local backup mode.",
+    "steps": [
+      {
+        "action": "Log in with a Google account and confirm that Contacts Backups is connected.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Open Settings and log out or disconnect the Google account.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Open Contacts Backups after logging out from the Google account.",
+        "data": "",
+        "result": "- The Google account is disconnected successfully.\n- The app no longer shows the user as logged in with Google.\n- The Backups screen is shown in the logged-out state.\n- Future backup behavior returns to local backup mode."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify auto-backup is created after merging duplicate contacts when auto-backup is enabled",
+    "description": "Verify that an automatic backup is created before or after merging duplicate contacts when auto-backup is enabled.",
+    "steps": [
+      {
+        "action": "Enable auto-backup in Contacts Backups.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Go to Duplicate contacts and merge duplicate contacts.",
+        "data": "",
+        "result": "- The merge action is completed successfully.\n- An automatic backup is created.\n- The auto-backup appears in the Backups list."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify auto-backup is created after cleaning incomplete contacts when auto-backup is enabled",
+    "description": "Verify that an automatic backup is created after cleaning incomplete contacts when auto-backup is enabled.",
+    "steps": [
+      {
+        "action": "Enable auto-backup in Contacts Backups.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Go to Incomplete contacts and clean selected contacts.",
+        "data": "",
+        "result": "- The cleaning action is completed successfully.\n- An automatic backup is created.\n- The auto-backup appears in the Backups list."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify auto-backup is created after cleaning contacts from All Contacts when auto-backup is enabled",
+    "description": "Verify that an automatic backup is created after cleaning contacts from All Contacts when auto-backup is enabled.",
+    "steps": [
+      {
+        "action": "Enable auto-backup in Contacts Backups.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Go to All Contacts and clean selected contacts.",
+        "data": "",
+        "result": "- The cleaning action is completed successfully.\n- An automatic backup is created.\n- The auto-backup appears in the Backups list."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify no auto-backup is created after contact cleaning actions when auto-backup is disabled",
+    "description": "Verify that no automatic backup is created after contact cleaning actions when auto-backup is disabled.",
+    "steps": [
+      {
+        "action": "Disable auto-backup in Contacts Backups.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Perform representative contact cleaning actions.",
+        "data": "- Merge Duplicate contacts\n- Clean Incomplete contacts\n- Clean contacts from All Contacts",
+        "result": "- The cleaning actions are completed successfully.\n- No automatic backup is created.\n- The Backups list does not show a new auto-backup generated by these actions."
+      }
+    ]
+  },
+  {
+    "projectKey": "ACANDMAU",
+    "summary": "Contacts Backups > Verify Google Account Access popup behavior based on Google login status",
+    "description": "Verify that the Google Account Access popup is shown when opening Backups without Google login and is no longer shown after logging in.",
+    "steps": [
+      {
+        "action": "Open Contacts Backups while not logged in with a Google account.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Observe the Google Account Access popup, then tap Don't Connect.",
+        "data": "",
+        "result": ""
+      },
+      {
+        "action": "Log in with a Google account and open Contacts Backups again.",
+        "data": "",
+        "result": "- The Google Account Access popup is shown when the user opens Backups without being logged in with Google.\n- After tapping Don't Connect, the user can continue to Backups and use local backup.\n- After logging in with Google, the Google Account Access popup is no longer shown when opening Backups."
+      }
+    ]
+  }
+]
