@@ -70,6 +70,16 @@ export class JiraClient {
 
     return allIssues;
   }
+    /**
+   * Create a new Jira issue.
+   * @param {object} fields  e.g. { project: { key }, issuetype: { name }, summary, ... }
+   * @returns {{ id: string, key: string, self: string }}
+   */
+    async createIssue(fields) {
+      const response = await this.http.post('/issue', { fields });
+      return response.data;
+    }
+    
 
   /**
    * Fetch subtasks for an issue.

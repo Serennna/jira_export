@@ -1,23 +1,8 @@
 /**
- * Jira/Xray Test Case Importer — Bypasses Xray API Key requirement
+ * Jira/Xray Test Case Importer — Two-Phase Approach
  *
- * Strategy
- * ────────
- * 1. Create Jira Test issue via Jira REST API (email + API token).
- * 2. Connect to your running Chrome via CDP (Playwright).
- * 3. Navigate to the new issue → wait for the Xray Connect iframe to load
- *    (eu.xray.cloud.getxray.app/view/webpanel/test/all-in-one).
- * 4. Call Xray's internal API **from within that iframe** using page.evaluate()
- *    → same-origin fetch, cookies are automatic, no Xray API keys needed.
- *    Endpoints used:
- *      POST /api/internal/tests/versions  → get testVersionId
- *      POST /api/internal/test/{issueId}/steps  → add each step
- * 5. Fall back to UI click automation if the API calls fail.
- *
- * Prerequisites
- * ─────────────
- *   sh start-chrome-debug.sh      # launch Chrome with CDP on port 9222
- *   Log in to Jira in that Chrome window
+ * Phase 1: Create all Jira Test issues via REST API
+ * Phase 2: After waiting for Xray indexing, add steps to each issue
  *
  * Usage
  * ─────
@@ -25,15 +10,17 @@
  *
  *   --project KEY      Jira project key  (required)
  *   --dry-run          Parse input only, do not create issues/steps
- *   --delay N          ms between issues (default 1500)
+ *   --delay N          ms between issues in phase 2 (default 1500)
  *   --test-set KEY     Add every created test to this Xray Test Set
+ *   --wait N           seconds to wait between phase 1 and 2 (default 120)
+ *   --resume           Skip phase 1, read from created_issues.json
  */
 
 import 'dotenv/config';
 import { chromium }    from 'playwright';
 import { JiraClient }  from './src/jiraClient.js';
 import ExcelJS         from 'exceljs';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { parse as parseCsv } from 'csv-parse/sync';
 import path from 'path';
 
@@ -48,21 +35,28 @@ const projectKey = opt('--project');
 const dryRun     = flag('--dry-run');
 const delay      = parseInt(opt('--delay', '1500'), 10);
 const testSetKey = opt('--test-set');
+const waitSec    = parseInt(opt('--wait', '120'), 10);
+const resume     = flag('--resume');
 
-if (!inputFile || !projectKey) {
+if (!resume && (!inputFile || !projectKey)) {
   console.error([
     '',
     'Usage: node import_ui.js <file.xlsx|file.csv> --project KEY [options]',
     '  --project KEY   Jira project key (required)',
     '  --dry-run       Parse only, no issues/steps created',
-    '  --delay N       ms between issues (default 1500)',
+    '  --delay N       ms between issues in phase 2 (default 1500)',
     '  --test-set KEY  Add tests to an existing Xray Test Set',
+    '  --wait N        seconds to wait between phase 1 and 2 (default 120)',
+    '  --resume        Skip phase 1, read from created_issues.json',
     '',
   ].join('\n'));
   process.exit(1);
 }
 
-if (!existsSync(inputFile)) { console.error(`File not found: ${inputFile}`); process.exit(1); }
+if (!resume && !existsSync(inputFile)) {
+  console.error(`File not found: ${inputFile}`);
+  process.exit(1);
+}
 
 const { JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
 if (!JIRA_BASE_URL || !JIRA_EMAIL || !JIRA_API_TOKEN) {
@@ -71,6 +65,7 @@ if (!JIRA_BASE_URL || !JIRA_EMAIL || !JIRA_API_TOKEN) {
 }
 
 const CDP_URL = 'http://127.0.0.1:9222';
+const CREATED_ISSUES_FILE = 'created_issues.json';
 
 // ── 1. Parse input file ───────────────────────────────────────────────────────
 
@@ -156,10 +151,6 @@ async function connectChrome() {
 
 // ── 3. Find the Xray "all-in-one" iframe ─────────────────────────────────────
 
-/**
- * Navigate to a Jira issue and return the Xray Connect "all-in-one" iframe.
- * Waits up to ~40 s for the frame to appear (new issues load slower).
- */
 async function openIssueAndFindXrayFrame(context, issueKey) {
   const page = await context.newPage();
 
@@ -168,7 +159,6 @@ async function openIssueAndFindXrayFrame(context, issueKey) {
     timeout: 40_000,
   });
 
-  // Wait for networkidle so the iframe has time to appear
   await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
   await page.waitForTimeout(3_000);
 
@@ -177,25 +167,47 @@ async function openIssueAndFindXrayFrame(context, issueKey) {
       f.url().includes('xray.cloud.getxray.app/view/webpanel/test/all-in-one')
     ) ?? null;
 
+  // Try to find and scroll the iframe element into view to trigger lazy load
+  const allInOneEl = page.locator('iframe[src*="all-in-one"]').first();
+  const elExists = await allInOneEl.count().then((n) => n > 0).catch(() => false);
+
+  if (elExists) {
+    console.log('  Found all-in-one iframe element, scrolling into view…');
+    await allInOneEl.scrollIntoViewIfNeeded({ timeout: 10_000 }).catch(() => {});
+    await page.waitForTimeout(3_000);
+  } else {
+    // Progressively scroll the page to trigger lazy-loaded panels
+    console.log('  Scrolling page progressively to trigger lazy load…');
+    for (let i = 1; i <= 5; i++) {
+      await page.evaluate((ratio) => {
+        window.scrollTo(0, document.body.scrollHeight * ratio);
+      }, i * 0.2);
+      await page.waitForTimeout(1_500);
+    }
+  }
+
   let xrayFrame = findFrame();
 
+  // Poll for the frame to appear (up to 30s)
   if (!xrayFrame) {
-    // Scroll to trigger any lazy-loaded panels
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(8_000);
-    xrayFrame = findFrame();
+    console.log('  Polling for all-in-one frame (up to 30s)…');
+    for (let i = 0; i < 10; i++) {
+      await page.waitForTimeout(3_000);
+      xrayFrame = findFrame();
+      if (xrayFrame) {
+        console.log(`  ✓ Frame appeared after ${(i + 1) * 3}s`);
+        break;
+      }
+      // Re-scroll on each attempt
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    }
   }
 
   return { page, xrayFrame };
 }
 
-// ── 4a. Add steps via Xray internal API (same-origin iframe fetch) ────────────
+// ── 4a. Add steps via Xray internal API ──────────────────────────────────────
 
-/**
- * Execute fetch() calls from within the Xray iframe.
- * Because the call is same-origin (eu.xray.cloud.getxray.app), cookies are
- * sent automatically — no separate Xray credentials needed.
- */
 async function addStepsViaInternalAPI(context, issueKey, issueId, steps) {
   console.log(`  Opening issue and waiting for Xray panel…`);
   const { page, xrayFrame } = await openIssueAndFindXrayFrame(context, issueKey);
@@ -210,45 +222,57 @@ async function addStepsViaInternalAPI(context, issueKey, issueId, steps) {
 
     console.log(`  ✓ Xray frame: ${xrayFrame.url().split('?')[0]}`);
 
-    // Wait for the Xray panel to fully initialize — "Add Step" must be visible
-    // before we make API calls (new issues need extra time to be indexed by Xray)
+    // Wait for "Add Step" button — fail hard if it doesn't appear
     console.log('  Waiting for Xray panel to initialize…');
-    await xrayFrame
-      .locator('button:has-text("Add Step")')
-      .first()
-      .waitFor({ state: 'visible', timeout: 20_000 })
-      .catch(() => console.log('  (Add Step button not visible yet — continuing)'));
+    let panelReady = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await xrayFrame
+          .locator('button:has-text("Add Step")')
+          .first()
+          .waitFor({ state: 'visible', timeout: 8_000 });
+        panelReady = true;
+        break;
+      } catch {
+        console.log(`  Xray panel not ready, retry ${attempt + 1}/5…`);
+        await xrayFrame.waitForTimeout(4_000);
+      }
+    }
+    if (!panelReady) {
+      throw new Error('Xray panel did not initialize after retries — Add Step button never appeared');
+    }
 
-    // --- Get x-acpt token (Atlassian Connect Plugin Token) ---
-    // Xray's internal API authenticates via x-acpt + x-addon-key headers,
-    // NOT via cookies or Authorization: Bearer.
-    // AP.context.getToken() returns exactly this token.
-    const acpt = await xrayFrame.evaluate(() =>
-      new Promise((resolve) => {
-        if (typeof AP !== 'undefined' && AP?.context?.getToken) {
-          AP.context.getToken((t) => resolve(t ?? null));
-          setTimeout(() => resolve(null), 5_000);
-        } else {
-          resolve(null);
-        }
-      })
-    ).catch(() => null);
+    // Get x-acpt token with retries
+    let acpt = null;
+    for (let i = 0; i < 3; i++) {
+      acpt = await xrayFrame.evaluate(() =>
+        new Promise((resolve) => {
+          if (typeof AP !== 'undefined' && AP?.context?.getToken) {
+            AP.context.getToken((t) => resolve(t ?? null));
+            setTimeout(() => resolve(null), 5_000);
+          } else {
+            resolve(null);
+          }
+        })
+      ).catch(() => null);
+      if (acpt) break;
+      console.log(`  x-acpt token not available, retry ${i + 1}/3…`);
+      await xrayFrame.waitForTimeout(3_000);
+    }
 
     if (acpt) {
       console.log(`  x-acpt token obtained`);
     } else {
-      console.log(`  x-acpt token: not available`);
+      throw new Error('x-acpt token unavailable after retries — Xray session may not be authenticated');
     }
 
     const xrayHeaders = {
-      'Content-Type':  'application/json',
-      'x-addon-key':   'com.xpandit.plugins.xray',
-      ...(acpt ? { 'x-acpt': acpt } : {}),
+      'Content-Type': 'application/json',
+      'x-addon-key':  'com.xpandit.plugins.xray',
+      'x-acpt':       acpt,
     };
 
-    // --- Get testVersionId ---
-    // Body format: {"issueIds":["<id>"],"includeArchived":true,"includeTestType":true}
-    // Response:    { "<id>": [{ testVersionId: "...", ... }] }
+    // Get testVersionId — fail hard if not available
     const { testVersionId, versionsError } = await xrayFrame.evaluate(
       async ({ xrayIssueId, headers }) => {
         try {
@@ -274,13 +298,12 @@ async function addStepsViaInternalAPI(context, issueKey, issueId, steps) {
       { xrayIssueId: issueId, headers: xrayHeaders }
     );
 
-    if (testVersionId) {
-      console.log(`  testVersionId: ${testVersionId}`);
-    } else {
-      console.log(`  testVersionId: not obtained (${versionsError})`);
+    if (!testVersionId) {
+      throw new Error(`Cannot get testVersionId: ${versionsError}`);
     }
+    console.log(`  testVersionId: ${testVersionId}`);
 
-    // --- Add each step ---
+    // Add each step
     let successCount = 0;
 
     for (let i = 0; i < steps.length; i++) {
@@ -291,7 +314,7 @@ async function addStepsViaInternalAPI(context, issueKey, issueId, steps) {
         async ({ xrayIssueId, testVersionId, step, headers, index }) => {
           const body = {
             index,
-            testVersionId: testVersionId ?? undefined,
+            testVersionId,
             action: step.action || '',
             data:   step.data   || '',
             result: step.result || '',
@@ -315,8 +338,8 @@ async function addStepsViaInternalAPI(context, issueKey, issueId, steps) {
 
               const errText = await res.text().catch(() => '');
               return { ok: false, status: res.status, error: errText.slice(0, 300), url };
-            } catch (err) {
-              // network error — try next
+            } catch {
+              // network error — try next endpoint
             }
           }
 
@@ -348,9 +371,6 @@ async function addStepsViaUI(context, issueKey, steps) {
   try {
     if (!xrayFrame) throw new Error('Xray panel not found for UI automation');
 
-    // "Add Step" is a dropdown button. Clicking it reveals a menu with
-    // [role="menuitem"] items: "New" | "Import Step" | "Call Test"
-    // We always click "Add Step" then pick the "New" menuitem.
     const addStepBtn = xrayFrame.locator('button:has-text("Add Step")').first();
     await addStepBtn.waitFor({ state: 'visible', timeout: 15_000 });
 
@@ -361,19 +381,15 @@ async function addStepsViaUI(context, issueKey, steps) {
       const label = `step ${i + 1}/${steps.length}`;
 
       try {
-        // 1. Open the dropdown
         await addStepBtn.click();
         await xrayFrame.waitForTimeout(400);
 
-        // 2. Click "New" menuitem (exact text match to avoid "Import Step" etc.)
         const newItem = xrayFrame.getByRole('menuitem', { name: 'New', exact: true });
         await newItem.waitFor({ state: 'visible', timeout: 3_000 });
         await newItem.click();
 
-        // 3. Wait for the inline step editor to appear (3 ProseMirror editors)
         await xrayFrame.waitForTimeout(800);
 
-        // 4. Fill Action / Data / Expected Result in order
         const editors = await xrayFrame.locator('.ProseMirror').all();
 
         const fillEditor = async (idx, value) => {
@@ -386,7 +402,6 @@ async function addStepsViaUI(context, issueKey, steps) {
         await fillEditor(1, step.data);
         await fillEditor(2, step.result);
 
-        // 5. Click "Create" (the save button in Xray Cloud's step editor)
         const createBtn = xrayFrame.getByRole('button', { name: 'Create', exact: true });
         await createBtn.waitFor({ state: 'visible', timeout: 5_000 });
         await createBtn.click();
@@ -408,45 +423,44 @@ async function addStepsViaUI(context, issueKey, steps) {
 // ── 5. Add test to a Test Set (optional) ─────────────────────────────────────
 
 async function addTestToTestSet(context, testKey, testSetKey) {
-  const page = await context.newPage();
+  const { page: _p, xrayFrame } = await openIssueAndFindXrayFrame(context, testSetKey);
+
   try {
-    await page.goto(`${JIRA_BASE_URL}/browse/${testSetKey}`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 40_000,
-    });
-    await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
-    await page.waitForTimeout(2_000);
-
-    const { page: _p, xrayFrame } = await openIssueAndFindXrayFrame(context, testSetKey);
-
     if (xrayFrame) {
       const r = await xrayFrame.evaluate(
-        async ({ baseUrl, testSetKey, testKey }) => {
-          // Try Xray internal API first, then Raven REST
-          const endpoints = [
-            { url: `/api/internal/testset/${testSetKey}/tests`, body: { add: [testKey] } },
-          ];
-          for (const { url, body } of endpoints) {
-            try {
-              const res = await fetch(url, {
-                method: 'POST', credentials: 'include',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-              });
-              if (res.ok) return { ok: true };
-            } catch {}
+        async ({ testSetKey, testKey }) => {
+          try {
+            const res = await fetch(`/api/internal/testset/${testSetKey}/tests`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ add: [testKey] }),
+            });
+            if (res.ok) return { ok: true };
+            return { ok: false };
+          } catch {
+            return { ok: false };
           }
-          return { ok: false };
         },
-        { baseUrl: JIRA_BASE_URL, testSetKey, testKey }
+        { testSetKey, testKey }
       );
       if (r?.ok) console.log(`  ✓ Added ${testKey} to Test Set ${testSetKey}`);
       else        console.warn(`  ⚠ Could not add ${testKey} to Test Set (check manually)`);
-      await _p.close();
     }
   } finally {
-    await page.close().catch(() => {});
+    await _p.close().catch(() => {});
   }
+}
+
+// ── Countdown helper ──────────────────────────────────────────────────────────
+
+async function countdown(seconds) {
+  for (let remaining = seconds; remaining > 0; remaining -= 10) {
+    const wait = Math.min(10, remaining);
+    process.stdout.write(`  ${remaining}s remaining…\r`);
+    await sleep(wait * 1000);
+  }
+  process.stdout.write('  Done waiting.              \n');
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -454,87 +468,109 @@ async function addTestToTestSet(context, testKey, testSetKey) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
-  console.log(`\n── Jira/Xray Test Importer ──────────────────────────────────────`);
-  console.log(`Input:   ${inputFile}`);
-  console.log(`Project: ${projectKey}`);
-  if (dryRun)     console.log('Mode:    DRY RUN');
-  if (testSetKey) console.log(`Test Set: ${testSetKey}`);
-  console.log('');
+  console.log(`\n── Jira/Xray Test Importer (Two-Phase) ──────────────────────────`);
 
-  // Parse
-  const tests = await parseInputFile(inputFile);
-  if (!tests.length) { console.error('No test cases found.'); process.exit(1); }
+  // ── Phase 1: Create issues (or resume from file) ──────────────────────────
+  let created = [];
 
-  console.log(`Found ${tests.length} test case(s):`);
-  for (const t of tests) console.log(`  • ${t.summary}  (${t.steps.length} steps)`);
-  console.log('');
+  if (resume) {
+    if (!existsSync(CREATED_ISSUES_FILE)) {
+      console.error(`--resume: ${CREATED_ISSUES_FILE} not found`);
+      process.exit(1);
+    }
+    created = JSON.parse(readFileSync(CREATED_ISSUES_FILE, 'utf8'));
+    console.log(`Resuming from ${CREATED_ISSUES_FILE}: ${created.length} issue(s)`);
+  } else {
+    console.log(`Input:   ${inputFile}`);
+    console.log(`Project: ${projectKey}`);
+    if (dryRun)     console.log('Mode:    DRY RUN');
+    if (testSetKey) console.log(`Test Set: ${testSetKey}`);
+    console.log('');
 
-  if (dryRun) { console.log('[dry-run] Done.'); return; }
+    const tests = await parseInputFile(inputFile);
+    if (!tests.length) { console.error('No test cases found.'); process.exit(1); }
 
-  // Jira REST client
-  const jira = new JiraClient({ baseUrl: JIRA_BASE_URL, email: JIRA_EMAIL, apiToken: JIRA_API_TOKEN });
+    console.log(`Found ${tests.length} test case(s):`);
+    for (const t of tests) console.log(`  • ${t.summary}  (${t.steps.length} steps)`);
+    console.log('');
 
-  // Connect Chrome
+    if (dryRun) { console.log('[dry-run] Done.'); return; }
+
+    const jira = new JiraClient({ baseUrl: JIRA_BASE_URL, email: JIRA_EMAIL, apiToken: JIRA_API_TOKEN });
+
+    console.log('── Phase 1: Creating Jira issues ────────────────────────────────');
+    for (const test of tests) {
+      try {
+        const { key, id } = await jira.createIssue({
+          project:   { key: projectKey },
+          issuetype: { name: 'Test' },
+          summary:   test.summary,
+        });
+        console.log(`  ✓ ${key}  ${test.summary}`);
+        created.push({ ...test, issueKey: key, issueId: id });
+      } catch (err) {
+        const msg = err.response?.data?.errorMessages?.join(', ') ?? err.message;
+        console.error(`  ✗ Failed to create: ${test.summary} — ${msg}`);
+      }
+      await sleep(500);
+    }
+
+    // Persist phase 1 results for potential --resume
+    writeFileSync(CREATED_ISSUES_FILE, JSON.stringify(created, null, 2));
+    console.log(`\n  Saved ${created.length} issue(s) to ${CREATED_ISSUES_FILE}`);
+  }
+
+  if (!created.length) {
+    console.error('No issues to process.');
+    process.exit(1);
+  }
+
+  // ── Wait for Xray to index all issues ─────────────────────────────────────
+  console.log(`\n── Waiting ${waitSec}s for Xray to index all issues ─────────────────`);
+  await countdown(waitSec);
+
+  // ── Phase 2: Add steps ────────────────────────────────────────────────────
+  console.log('\n── Phase 2: Adding steps ────────────────────────────────────────');
+
   const { browser, context } = await connectChrome();
-
   const results = [];
 
-  for (let idx = 0; idx < tests.length; idx++) {
-    const test = tests[idx];
-    console.log(`\n[${idx + 1}/${tests.length}] ${test.summary}`);
+  for (let idx = 0; idx < created.length; idx++) {
+    const item = created[idx];
+    console.log(`\n[${idx + 1}/${created.length}] ${item.issueKey}  ${item.summary}`);
 
-    // 1. Create Jira issue
-    let issueKey, issueId;
+    if (!item.steps?.length) {
+      results.push({ ...item, status: 'OK_NO_STEPS' });
+      continue;
+    }
+
+    let stepsOk = false;
     try {
-      const created = await jira.createIssue({
-        project:   { key: projectKey },
-        issuetype: { name: 'Test' },
-        summary:   test.summary,
-      });
-      issueKey = created.key;
-      issueId  = created.id;
-      console.log(`  ✓ Created: ${issueKey}  (id: ${issueId})`);
+      stepsOk = await addStepsViaInternalAPI(context, item.issueKey, item.issueId, item.steps);
     } catch (err) {
-      const msg = err.response?.data?.errorMessages?.join(', ') ?? err.message;
-      console.error(`  ✗ Jira issue creation failed: ${msg}`);
-      results.push({ summary: test.summary, issueKey: null, status: 'JIRA_FAILED' });
-      continue;
+      console.warn(`  ⚠ Internal API failed: ${err.message}`);
     }
-
-    if (!test.steps.length) {
-      results.push({ summary: test.summary, issueKey, status: 'OK_NO_STEPS' });
-      continue;
-    }
-
-    // 2. Add steps — internal API first, UI fallback
-    let stepsOk = await addStepsViaInternalAPI(context, issueKey, issueId, test.steps);
 
     if (!stepsOk) {
-      stepsOk = await addStepsViaUI(context, issueKey, test.steps);
+      stepsOk = await addStepsViaUI(context, item.issueKey, item.steps);
     }
 
-    results.push({
-      summary: test.summary,
-      issueKey,
-      status: stepsOk ? 'OK' : 'STEPS_PARTIAL',
-    });
+    results.push({ ...item, status: stepsOk ? 'OK' : 'STEPS_PARTIAL' });
 
-    // 3. Add to Test Set
-    if (testSetKey) await addTestToTestSet(context, issueKey, testSetKey);
+    if (testSetKey) await addTestToTestSet(context, item.issueKey, testSetKey);
 
-    if (idx < tests.length - 1) await sleep(delay);
+    if (idx < created.length - 1) await sleep(delay);
   }
 
-  // Summary
+  // ── Summary ───────────────────────────────────────────────────────────────
   console.log('\n── Results ──────────────────────────────────────────────────────');
   for (const r of results) {
-    const icon = r.status === 'OK' || r.status === 'OK_NO_STEPS' ? '✓' : r.status === 'STEPS_PARTIAL' ? '⚠' : '✗';
+    const icon = ['OK', 'OK_NO_STEPS'].includes(r.status) ? '✓' : r.status === 'STEPS_PARTIAL' ? '⚠' : '✗';
     const note = r.status === 'STEPS_PARTIAL' ? '  ← steps incomplete' : '';
-    if (r.issueKey) console.log(`  ${icon} ${r.issueKey}  ${r.summary}${note}`);
-    else            console.log(`  ✗ (failed)  ${r.summary}`);
+    console.log(`  ${icon} ${r.issueKey}  ${r.summary}${note}`);
   }
 
-  const ok      = results.filter((r) => ['OK','OK_NO_STEPS'].includes(r.status)).length;
+  const ok      = results.filter((r) => ['OK', 'OK_NO_STEPS'].includes(r.status)).length;
   const partial = results.filter((r) => r.status === 'STEPS_PARTIAL').length;
   const failed  = results.filter((r) => r.status === 'JIRA_FAILED').length;
   console.log(`\nTotal: ${ok} ok / ${partial} partial / ${failed} failed`);
