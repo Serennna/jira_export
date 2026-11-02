@@ -79,7 +79,16 @@ export class JiraClient {
       const response = await this.http.post('/issue', { fields });
       return response.data;
     }
-    
+
+  /**
+   * Edit an existing issue.
+   * @param {string} issueKey
+   * @param {object} body  e.g. { fields: {...} } and/or { update: { labels: [{ add: 'x' }] } }
+   */
+  async updateIssue(issueKey, body) {
+    await this.http.put(`/issue/${issueKey}`, body);
+  }
+
 
   /**
    * Fetch subtasks for an issue.

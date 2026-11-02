@@ -1,0 +1,7 @@
+{
+  "project": "XXXXX",
+  "testSet": null,
+  "fixVersions": ["1.18.0"],
+  "components": ["XXXX", "XXXX"],
+  "labels": []
+}

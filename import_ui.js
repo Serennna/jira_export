@@ -7,18 +7,28 @@
  * Usage
  * ─────
  *   node import_ui.js <file.xlsx|file.csv> --project KEY [options]
+ *   node import_ui.js --resume --wait 0 
  *
  *   --project KEY      Jira project key  (required)
- *   --dry-run          Parse input only, do not create issues/steps
+ *   --dry-run          Parse input only, do not create issues/stepssh
  *   --delay N          ms between issues in phase 2 (default 1500)
  *   --test-set KEY     Add every created test to this Xray Test Set
  *   --wait N           seconds to wait between phase 1 and 2 (default 120)
  *   --resume           Skip phase 1, read from created_issues.json
+ *   --fix-version A,B  Fix versions (must already exist in the project)
+ *   --component A,B    Components (must already exist in the project)
+ *   --labels A,B       Labels (no spaces)
+ *                      With --resume these are added to the existing issues
+ *   --headless         Add steps in a background Chromium using saved cookies
+ *                      (.auth/import-session.json, exported from the debug Chrome when missing/expired)
+ *   --config FILE      Defaults for project / testSet / fixVersions / components / labels / headless
+ *                      (default import.config.json if present; CLI flags override it)
  */
 
 import 'dotenv/config';
 import { chromium }    from 'playwright';
 import { JiraClient }  from './src/jiraClient.js';
+import { openHeadlessSession } from './src/playwright/headlessSession.js';
 import ExcelJS         from 'exceljs';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { parse as parseCsv } from 'csv-parse/sync';
@@ -30,13 +40,37 @@ const args      = process.argv.slice(2);
 const flag      = (n) => args.includes(n);
 const opt       = (n, d = null) => { const i = args.indexOf(n); return i !== -1 ? args[i + 1] : d; };
 
-const inputFile  = args.find((a) => !a.startsWith('--'));
-const projectKey = opt('--project');
+const BOOLEAN_FLAGS = ['--dry-run', '--resume', '--headless'];
+const inputFile  = args.find((a, i) =>
+  !a.startsWith('--') && !(i > 0 && args[i - 1].startsWith('--') && !BOOLEAN_FLAGS.includes(args[i - 1]))
+);
+
+const configFile = opt('--config', 'import.config.json');
+if (flag('--config') && !existsSync(configFile)) {
+  console.error(`Config file not found: ${configFile}`);
+  process.exit(1);
+}
+const config = existsSync(configFile) ? JSON.parse(readFileSync(configFile, 'utf8')) : {};
+
+const toList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(','))
+  .map((s) => String(s).trim()).filter(Boolean);
+const list = (n, fallback) => (flag(n) ? toList(opt(n)) : toList(fallback));
+
+const projectKey = opt('--project', config.project ?? null);
 const dryRun     = flag('--dry-run');
 const delay      = parseInt(opt('--delay', '1500'), 10);
-const testSetKey = opt('--test-set');
+const testSetKey = opt('--test-set', config.testSet ?? null);
 const waitSec    = parseInt(opt('--wait', '120'), 10);
 const resume     = flag('--resume');
+const headless   = flag('--headless') || config.headless === true;
+const fixVersions = list('--fix-version', config.fixVersions);
+const components  = list('--component',   config.components);
+const labels      = list('--labels',      config.labels);
+
+if (labels.some((l) => /\s/.test(l))) {
+  console.error('Labels cannot contain spaces');
+  process.exit(1);
+}
 
 if (!resume && (!inputFile || !projectKey)) {
   console.error([
@@ -48,6 +82,11 @@ if (!resume && (!inputFile || !projectKey)) {
     '  --test-set KEY  Add tests to an existing Xray Test Set',
     '  --wait N        seconds to wait between phase 1 and 2 (default 120)',
     '  --resume        Skip phase 1, read from created_issues.json',
+    '  --fix-version A,B  Fix versions (must exist in the project)',
+    '  --component A,B    Components (must exist in the project)',
+    '  --labels A,B       Labels (no spaces)',
+    '  --headless         Run steps in a background browser with saved cookies',
+    '  --config FILE      Defaults file (default import.config.json)',
     '',
   ].join('\n'));
   process.exit(1);
@@ -66,6 +105,9 @@ if (!JIRA_BASE_URL || !JIRA_EMAIL || !JIRA_API_TOKEN) {
 
 const CDP_URL = 'http://127.0.0.1:9222';
 const CREATED_ISSUES_FILE = 'created_issues.json';
+
+// Set once the Forge-based Xray panel is seen; the internal API is then skipped for all issues
+let forgePanel = false;
 
 // ── 1. Parse input file ───────────────────────────────────────────────────────
 
@@ -162,9 +204,11 @@ async function openIssueAndFindXrayFrame(context, issueKey) {
   await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
   await page.waitForTimeout(3_000);
 
+  // Xray on Forge renders the panel from an atlassian-dev.net CDN under /test-issue-panel/
   const findFrame = () =>
     page.frames().find((f) =>
-      f.url().includes('xray.cloud.getxray.app/view/webpanel/test/all-in-one')
+      f.url().includes('xray.cloud.getxray.app/view/webpanel/test/all-in-one') ||
+      f.url().includes('/test-issue-panel/')
     ) ?? null;
 
   // Try to find and scroll the iframe element into view to trigger lazy load
@@ -221,6 +265,11 @@ async function addStepsViaInternalAPI(context, issueKey, issueId, steps) {
     }
 
     console.log(`  ✓ Xray frame: ${xrayFrame.url().split('?')[0]}`);
+
+    if (!xrayFrame.url().includes('xray.cloud.getxray.app')) {
+      forgePanel = true;
+      throw new Error('Xray Forge panel detected — internal API not available');
+    }
 
     // Wait for "Add Step" button — fail hard if it doesn't appear
     console.log('  Waiting for Xray panel to initialize…');
@@ -374,11 +423,27 @@ async function addStepsViaUI(context, issueKey, steps) {
     const addStepBtn = xrayFrame.locator('button:has-text("Add Step")').first();
     await addStepBtn.waitFor({ state: 'visible', timeout: 15_000 });
 
+    const squash = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+    // Text of saved steps only — editor contents of an open form are excluded
+    const panelText = async () => squash(await xrayFrame.evaluate(() => {
+      const clone = document.body.cloneNode(true);
+      clone.querySelectorAll('.ProseMirror').forEach((e) => e.remove());
+      return clone.innerText;
+    }));
+    const existing = await panelText();
+
     let successCount = 0;
 
     for (let i = 0; i < steps.length; i++) {
       const step  = steps[i];
       const label = `step ${i + 1}/${steps.length}`;
+      const marker = squash(step.action || step.result).slice(0, 80);
+
+      if (marker && existing.includes(marker)) {
+        console.log(`    – ${label} already exists, skipping`);
+        successCount++;
+        continue;
+      }
 
       try {
         await addStepBtn.click();
@@ -402,15 +467,30 @@ async function addStepsViaUI(context, issueKey, steps) {
         await fillEditor(1, step.data);
         await fillEditor(2, step.result);
 
-        const createBtn = xrayFrame.getByRole('button', { name: 'Create', exact: true });
+        // Xray ignores Create clicked right after typing, before the editors sync their content
+        await xrayFrame.waitForTimeout(1_000);
+
+        const createBtn = xrayFrame.locator('#step-action-submit');
         await createBtn.waitFor({ state: 'visible', timeout: 5_000 });
-        await createBtn.click();
-        await xrayFrame.waitForTimeout(1_500);
+
+        let saved = false;
+        for (let attempt = 0; attempt < 2 && !saved; attempt++) {
+          if (!(await createBtn.isVisible().catch(() => false))) break;
+          await createBtn.click();
+          for (let t = 0; t < 20 && !saved; t++) {
+            await xrayFrame.waitForTimeout(500);
+            const formOpen = await createBtn.isVisible().catch(() => false);
+            saved = !formOpen && (!marker || (await panelText()).includes(marker));
+          }
+        }
+        if (!saved) throw new Error('step was not saved after Create');
+        await xrayFrame.waitForTimeout(1_000);
 
         console.log(`    ✓ ${label} added (UI)`);
         successCount++;
       } catch (err) {
         console.warn(`    ✗ ${label} UI failed: ${err.message}`);
+        break;
       }
     }
 
@@ -467,6 +547,36 @@ async function countdown(seconds) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function jiraError(err) {
+  const data = err.response?.data;
+  const parts = [...(data?.errorMessages ?? []), ...Object.entries(data?.errors ?? {}).map(([k, v]) => `${k}: ${v}`)];
+  return parts.length ? parts.join(', ') : err.message;
+}
+
+async function addFieldsToExisting(items) {
+  const jira = new JiraClient({ baseUrl: JIRA_BASE_URL, email: JIRA_EMAIL, apiToken: JIRA_API_TOKEN });
+  const update = {
+    ...(fixVersions.length && { fixVersions: fixVersions.map((name) => ({ add: { name } })) }),
+    ...(components.length  && { components:  components.map((name) => ({ add: { name } })) }),
+    ...(labels.length      && { labels:      labels.map((l) => ({ add: l })) }),
+  };
+
+  console.log('\n── Adding Fix versions / Components / Labels ────────────────────');
+  if (fixVersions.length) console.log(`  Fix versions: ${fixVersions.join(', ')}`);
+  if (components.length)  console.log(`  Components:   ${components.join(', ')}`);
+  if (labels.length)      console.log(`  Labels:       ${labels.join(', ')}`);
+
+  for (const item of items) {
+    try {
+      await jira.updateIssue(item.issueKey, { update });
+      console.log(`  ✓ ${item.issueKey}`);
+    } catch (err) {
+      console.error(`  ✗ ${item.issueKey} — ${jiraError(err)}`);
+    }
+    await sleep(300);
+  }
+}
+
 async function main() {
   console.log(`\n── Jira/Xray Test Importer (Two-Phase) ──────────────────────────`);
 
@@ -480,11 +590,18 @@ async function main() {
     }
     created = JSON.parse(readFileSync(CREATED_ISSUES_FILE, 'utf8'));
     console.log(`Resuming from ${CREATED_ISSUES_FILE}: ${created.length} issue(s)`);
+
+    if (fixVersions.length || components.length || labels.length) {
+      await addFieldsToExisting(created);
+    }
   } else {
     console.log(`Input:   ${inputFile}`);
     console.log(`Project: ${projectKey}`);
     if (dryRun)     console.log('Mode:    DRY RUN');
     if (testSetKey) console.log(`Test Set: ${testSetKey}`);
+    if (fixVersions.length) console.log(`Fix versions: ${fixVersions.join(', ')}`);
+    if (components.length)  console.log(`Components:   ${components.join(', ')}`);
+    if (labels.length)      console.log(`Labels:       ${labels.join(', ')}`);
     console.log('');
 
     const tests = await parseInputFile(inputFile);
@@ -505,12 +622,14 @@ async function main() {
           project:   { key: projectKey },
           issuetype: { name: 'Test' },
           summary:   test.summary,
+          ...(fixVersions.length && { fixVersions: fixVersions.map((name) => ({ name })) }),
+          ...(components.length  && { components:  components.map((name) => ({ name })) }),
+          ...(labels.length      && { labels }),
         });
         console.log(`  ✓ ${key}  ${test.summary}`);
         created.push({ ...test, issueKey: key, issueId: id });
       } catch (err) {
-        const msg = err.response?.data?.errorMessages?.join(', ') ?? err.message;
-        console.error(`  ✗ Failed to create: ${test.summary} — ${msg}`);
+        console.error(`  ✗ Failed to create: ${test.summary} — ${jiraError(err)}`);
       }
       await sleep(500);
     }
@@ -532,7 +651,9 @@ async function main() {
   // ── Phase 2: Add steps ────────────────────────────────────────────────────
   console.log('\n── Phase 2: Adding steps ────────────────────────────────────────');
 
-  const { browser, context } = await connectChrome();
+  const { browser, context, persist } = headless
+    ? await openHeadlessSession({ baseUrl: JIRA_BASE_URL, cdpUrl: CDP_URL })
+    : { ...(await connectChrome()), persist: async () => {} };
   const results = [];
 
   for (let idx = 0; idx < created.length; idx++) {
@@ -544,11 +665,19 @@ async function main() {
       continue;
     }
 
+    if (item.stepsDone) {
+      console.log('  Steps already added in a previous run, skipping');
+      results.push({ ...item, status: 'OK' });
+      continue;
+    }
+
     let stepsOk = false;
-    try {
-      stepsOk = await addStepsViaInternalAPI(context, item.issueKey, item.issueId, item.steps);
-    } catch (err) {
-      console.warn(`  ⚠ Internal API failed: ${err.message}`);
+    if (!forgePanel) {
+      try {
+        stepsOk = await addStepsViaInternalAPI(context, item.issueKey, item.issueId, item.steps);
+      } catch (err) {
+        console.warn(`  ⚠ Internal API failed: ${err.message}`);
+      }
     }
 
     if (!stepsOk) {
@@ -557,7 +686,14 @@ async function main() {
 
     results.push({ ...item, status: stepsOk ? 'OK' : 'STEPS_PARTIAL' });
 
+    if (stepsOk) {
+      item.stepsDone = true;
+      writeFileSync(CREATED_ISSUES_FILE, JSON.stringify(created, null, 2));
+    }
+
     if (testSetKey) await addTestToTestSet(context, item.issueKey, testSetKey);
+
+    await persist();
 
     if (idx < created.length - 1) await sleep(delay);
   }
